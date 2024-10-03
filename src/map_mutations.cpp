@@ -25,6 +25,7 @@
 #include <iostream>
 #include <unordered_map>
 #include <vector>
+#include <mutex>
 
 // When enabled: garbage collects unneeded sample sets
 #define CLEANUP_SAMPLE_SETS_MAPPING 1
@@ -303,6 +304,60 @@ static NodeIDList greedyAddMutation(const MutableGRGPtr& grg,
     return addedNodes;
 }
 
+
+/**
+ * @brief Maps a single mutation into the GRG.
+ *
+ * This function encapsulates the logic previously inside the while loop of mapMutations.
+ *
+ * @param grg The mutable genotype representation graph.
+ * @param topoOrder The current topological order of the GRG.
+ * @param sampleCounts The current sample counts for each node.
+ * @param mutation The mutation to map.
+ * @param stats The statistics object to update.
+ * @param shapeNodeIdMax The threshold NodeID to identify newly added mutation nodes.
+ * @return NodeIDList List of nodes added during the mapping.
+ */
+static NodeIDList mapSingleMutation(const MutableGRGPtr& grg,
+                                    std::vector<NodeID>& topoOrder,
+                                    std::vector<NodeIDSizeT>& sampleCounts,
+                                    const Mutation& mutation,
+                                    const NodeIDList& mutSamples,
+                                    MutationMappingStats& stats,
+                                    const NodeID shapeNodeIdMax) {
+    if (!mutSamples.empty()) {
+        stats.samplesProcessed += mutSamples.size();
+        if (mutSamples.size() == 1) {
+            stats.mutationsWithOneSample++;
+        }
+        // Step 1: Add mutation node and create edges to existing nodes.
+        NodeIDList addedNodes =
+            greedyAddMutation(grg, topoOrder, sampleCounts, mutation, mutSamples, stats, shapeNodeIdMax);
+
+        // Step 2: Add the new mutation node to the topological order.
+        topoOrder.resize(topoOrder.size() + addedNodes.size());
+        sampleCounts.resize(sampleCounts.size() + addedNodes.size());
+        for (const auto& nodeId : addedNodes) {
+            NodeIDSizeT maxOrder = 0;
+            NodeIDSizeT sumSamples = 0;
+            for (const auto& childId : grg->getDownEdges(nodeId)) {
+                maxOrder = std::max<NodeIDSizeT>(maxOrder, topoOrder[childId]);
+                release_assert(sampleCounts[childId] > 0);
+                sumSamples += sampleCounts[childId];
+            }
+            topoOrder[nodeId] = maxOrder;
+
+            // Step 3: Update sample count for the new node.
+            sampleCounts[nodeId] = sumSamples;
+        }
+        return addedNodes;
+    } else {
+        stats.emptyMutations++;
+        grg->addMutation(mutation, INVALID_NODE_ID);
+        return {};
+    }
+}
+
 MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mutations) {
     auto operationStartTime = std::chrono::high_resolution_clock::now();
 #define START_TIMING_OPERATION() operationStartTime = std::chrono::high_resolution_clock::now();
@@ -344,45 +399,20 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
     // is a newly added (mutation) node.
     const NodeID shapeNodeIdMax = grg->numNodes();
 
-    // For each mutation, perform a topological bottom-up traversal from the sample
-    // nodes of interest, and collect all nodes that reach a subset of those nodes.
-    size_t _ignored = 0;
+    // Initialize addedNodes to track nodes added during mapping
+    NodeIDList addedNodes;
+
+    // Variables to hold mutation data
     MutationAndSamples unmapped = {Mutation(0.0, ""), NodeIDList()};
+    size_t _ignored = 0;
+
     while (mutations.next(unmapped, _ignored)) {
-        bool tracing = false;
         const NodeIDList& mutSamples = unmapped.samples;
-        if (!mutSamples.empty()) {
-            if (tracing) {
-                std::cout << ">>> Has " << mutSamples.size() << " samples\n";
-            }
-            stats.samplesProcessed += mutSamples.size();
-            if (mutSamples.size() == 1) {
-                stats.mutationsWithOneSample++;
-            }
-            // Step 1: Add mutation node and create edges to existing nodes.
-            NodeIDList addedNodes =
-                greedyAddMutation(grg, topoOrder, sampleCounts, unmapped.mutation, mutSamples, stats, shapeNodeIdMax);
 
-            // Step 2: Add the new mutation node to the topological order.
-            topoOrder.resize(topoOrder.size() + addedNodes.size());
-            sampleCounts.resize(sampleCounts.size() + addedNodes.size());
-            for (const auto& nodeId : addedNodes) {
-                NodeIDSizeT maxOrder = 0;
-                NodeIDSizeT sumSamples = 0;
-                for (const auto& childId : grg->getDownEdges(nodeId)) {
-                    maxOrder = std::max<NodeIDSizeT>(maxOrder, topoOrder[childId]);
-                    release_assert(sampleCounts[childId] > 0);
-                    sumSamples += sampleCounts[childId];
-                }
-                topoOrder[nodeId] = maxOrder;
+        // Map the single mutation using the refactored function
+        NodeIDList newlyAddedNodes = mapSingleMutation(grg, topoOrder, sampleCounts, unmapped.mutation, mutSamples, stats, shapeNodeIdMax);
+        addedNodes.insert(addedNodes.end(), newlyAddedNodes.begin(), newlyAddedNodes.end());
 
-                // Step 3: Update sample count for the new node.
-                sampleCounts[nodeId] = sumSamples;
-            }
-        } else {
-            stats.emptyMutations++;
-            grg->addMutation(unmapped.mutation, INVALID_NODE_ID);
-        }
         completed++;
         const size_t percentCompleted = (completed / onePercent);
         if ((completed % onePercent == 0)) {
@@ -400,6 +430,7 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
             EMIT_TIMING_MESSAGE("Compacting GRG edges took ");
         }
     }
+
     return stats;
 }
 
