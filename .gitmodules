@@ -11,3 +11,6 @@
 [submodule "third-party/bgen"]
 	path = third-party/bgen
 	url = ../../dcdehaas/bgen
+[submodule "third-party/parlaylib"]
+	path = third-party/parlaylib
+	url = https://github.com/cmuparlay/parlaylib.git
