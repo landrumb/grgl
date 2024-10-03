@@ -20,7 +20,7 @@ check_symbol_exists(posix_fadvise "fcntl.h" HAVE_POSIX_FADVISE)
 # Global flags that affect more than one target.
 add_compile_options(-DCOMPACT_NODE_IDS -DVCF_GZ_SUPPORT)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
