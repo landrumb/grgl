@@ -21,11 +21,18 @@
 #include "grgl/visitor.h"
 #include "util.h"
 
+#include "parlay/parallel.h"
+#include "parlay/sequence.h"
+#include "parlay/primitives.h"
+
 #include <algorithm>
 #include <iostream>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
-#include <mutex>
+
+// The number of consecutive samples that can share a lock.
+#define SAMPLE_LOCK_SHARING_FACTOR 1 
 
 // When enabled: garbage collects unneeded sample sets
 #define CLEANUP_SAMPLE_SETS_MAPPING 1
@@ -324,7 +331,9 @@ static NodeIDList mapSingleMutation(const MutableGRGPtr& grg,
                                     const Mutation& mutation,
                                     const NodeIDList& mutSamples,
                                     MutationMappingStats& stats,
-                                    const NodeID shapeNodeIdMax) {
+                                    const NodeID shapeNodeIdMax,
+                                    std::mutex& topoOrderMutex,
+                                    std::mutex& sampleCountsMutex) {
     if (!mutSamples.empty()) {
         stats.samplesProcessed += mutSamples.size();
         if (mutSamples.size() == 1) {
@@ -335,6 +344,11 @@ static NodeIDList mapSingleMutation(const MutableGRGPtr& grg,
             greedyAddMutation(grg, topoOrder, sampleCounts, mutation, mutSamples, stats, shapeNodeIdMax);
 
         // Step 2: Add the new mutation node to the topological order.
+        // We need to lock the topo order and sample counts to do this safely (for now...)
+        // these are freed implicitly by lock_guard on return
+        std::lock_guard<std::mutex> lockTopoOrder(topoOrderMutex);
+        std::lock_guard<std::mutex> lockSampleCounts(sampleCountsMutex);
+
         topoOrder.resize(topoOrder.size() + addedNodes.size());
         sampleCounts.resize(sampleCounts.size() + addedNodes.size());
         for (const auto& nodeId : addedNodes) {
@@ -393,7 +407,7 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
 
     std::cout << "Mapping " << stats.totalMutations << " mutations\n";
     size_t onePercent = (stats.totalMutations / ONE_HUNDRED_PERCENT) + 1;
-    size_t completed = 0;
+    std::atomic<size_t> completed = 0;
 
     // The low-water mark for nodes. If a NodeID is greater than or equal to this, then it
     // is a newly added (mutation) node.
@@ -401,35 +415,106 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
 
     // Initialize addedNodes to track nodes added during mapping
     NodeIDList addedNodes;
+    // we want to store a unique addedNodes for each mutation and merge them at the end
+    parlay::sequence<NodeIDList> addedNodesSeq{mutationCount};
 
     // Variables to hold mutation data
     MutationAndSamples unmapped = {Mutation(0.0, ""), NodeIDList()};
     size_t _ignored = 0;
 
+    // mutexes to protect samples from concurrent relevant mutations
+    std::vector<std::mutex> sampleLocks((sampleCounts.size() + SAMPLE_LOCK_SHARING_FACTOR - 1) / SAMPLE_LOCK_SHARING_FACTOR);
+
+    // keep the mutations in a vector to allow parallel processing
+    std::vector<MutationAndSamples> mutationsVector{};
+    // mutationsVector.reserve(mutationCount); // there's a method I can't remember the name of that would let me reserve without initializing
     while (mutations.next(unmapped, _ignored)) {
-        const NodeIDList& mutSamples = unmapped.samples;
+        mutationsVector.push_back(unmapped);
+    }
 
-        // Map the single mutation using the refactored function
-        NodeIDList newlyAddedNodes = mapSingleMutation(grg, topoOrder, sampleCounts, unmapped.mutation, mutSamples, stats, shapeNodeIdMax);
-        addedNodes.insert(addedNodes.end(), newlyAddedNodes.begin(), newlyAddedNodes.end());
+    // criminal and awful hack for a working first parallel implementation
+    std::mutex topoOrderMutex;
+    std::mutex sampleCountsMutex;
 
-        completed++;
-        const size_t percentCompleted = (completed / onePercent);
-        if ((completed % onePercent == 0)) {
+    // parallel processing of mutations
+    parlay::parallel_for(0, mutationsVector.size(), [&](size_t i) {
+        const MutationAndSamples& unmapped = mutationsVector[i];
+        const NodeIDList mutSamples = unmapped.samples; // copy here is only to allow sorting
+
+        std::vector<std::unique_lock<std::mutex>> sampleLocksAcquired;
+
+        // acquire the lock for each sample 
+        // to prevent deadlock we may need to ensure the locks are acquired in sorted order
+        // we have to copy the samples to sort them
+
+        // std::sort(mutSamples.begin(), mutSamples.end());
+
+        for (const auto& sampleId : mutSamples) {
+            const size_t lockIndex = sampleId / SAMPLE_LOCK_SHARING_FACTOR;
+            sampleLocksAcquired.emplace_back(std::move(std::unique_lock<std::mutex>(sampleLocks[lockIndex])));
+        }
+
+
+        // Map the single mutation
+        NodeIDList newlyAddedNodes =
+            mapSingleMutation(grg, topoOrder, sampleCounts, unmapped.mutation, mutSamples, stats, shapeNodeIdMax, topoOrderMutex, sampleCountsMutex);
+        
+
+        auto owned_completion = ++completed;
+        const size_t percentCompleted = (owned_completion / onePercent);
+        if ((owned_completion % onePercent == 0)) {
             std::cout << percentCompleted << "% done" << std::endl;
         }
-        if ((completed % (EMIT_STATS_AT_PERCENT * onePercent) == 0)) {
+        if ((owned_completion % (EMIT_STATS_AT_PERCENT * onePercent) == 0)) {
             std::cout << "Last mutation sampleset size: " << mutSamples.size() << std::endl;
             std::cout << "GRG nodes: " << grg->numNodes() << std::endl;
             std::cout << "GRG edges: " << grg->numEdges() << std::endl;
             stats.print(std::cout);
         }
-        if ((completed % (COMPACT_EDGES_AT_PERCENT * onePercent) == 0)) {
+        if ((owned_completion % (COMPACT_EDGES_AT_PERCENT * onePercent) == 0)) {
             START_TIMING_OPERATION();
             grg->compact();
             EMIT_TIMING_MESSAGE("Compacting GRG edges took ");
         }
+
+        addedNodesSeq[i] = newlyAddedNodes;
+    }, 0, true);
+
+    // I'm not sure if addedNodes is ever used, but I'll build it again for completeness
+    for (const auto& nodes : addedNodesSeq) {
+        if (nodes.empty()) {
+            continue;
+        }
+        addedNodes.insert(addedNodes.end(), nodes.begin(), nodes.end());
     }
+
+    // while (mutations.next(unmapped, _ignored)) {
+    //     const NodeIDList& mutSamples = unmapped.samples;
+
+
+    //     // Map the single mutation 
+    //     NodeIDList newlyAddedNodes =
+    //         mapSingleMutation(grg, topoOrder, sampleCounts, unmapped.mutation, mutSamples, stats, shapeNodeIdMax);
+
+    //     addedNodes.insert(addedNodes.end(), newlyAddedNodes.begin(), newlyAddedNodes.end());
+
+    //     completed++;
+    //     const size_t percentCompleted = (completed / onePercent);
+    //     if ((completed % onePercent == 0)) {
+    //         std::cout << percentCompleted << "% done" << std::endl;
+    //     }
+    //     if ((completed % (EMIT_STATS_AT_PERCENT * onePercent) == 0)) {
+    //         std::cout << "Last mutation sampleset size: " << mutSamples.size() << std::endl;
+    //         std::cout << "GRG nodes: " << grg->numNodes() << std::endl;
+    //         std::cout << "GRG edges: " << grg->numEdges() << std::endl;
+    //         stats.print(std::cout);
+    //     }
+    //     if ((completed % (COMPACT_EDGES_AT_PERCENT * onePercent) == 0)) {
+    //         START_TIMING_OPERATION();
+    //         grg->compact();
+    //         EMIT_TIMING_MESSAGE("Compacting GRG edges took ");
+    //     }
+    // }
 
     return stats;
 }
