@@ -471,11 +471,11 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
             std::cout << "GRG edges: " << grg->numEdges() << std::endl;
             stats.print(std::cout);
         }
-        if ((owned_completion % (COMPACT_EDGES_AT_PERCENT * onePercent) == 0)) {
-            START_TIMING_OPERATION();
-            grg->compact();
-            EMIT_TIMING_MESSAGE("Compacting GRG edges took ");
-        }
+        // if ((owned_completion % (COMPACT_EDGES_AT_PERCENT * onePercent) == 0)) {
+        //     START_TIMING_OPERATION();
+        //     grg->compact();
+        //     EMIT_TIMING_MESSAGE("Compacting GRG edges took ");
+        // }
 
         addedNodesSeq[i] = newlyAddedNodes;
     }, 0, true);
@@ -516,7 +516,7 @@ MutationMappingStats mapMutations(const MutableGRGPtr& grg, MutationIterator& mu
     //     }
     // }
 
-    return stats;
+    return (stats);
 }
 
 }; // namespace grgl
