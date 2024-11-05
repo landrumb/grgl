@@ -359,7 +359,7 @@ static NodeIDList mapSingleMutation(const MutableGRGPtr& grg,
                 release_assert(sampleCounts[childId] > 0);
                 sumSamples += sampleCounts[childId];
             }
-            topoOrder[nodeId] = maxOrder;
+            topoOrder[nodeId] = maxOrder + 1; 
 
             // Step 3: Update sample count for the new node.
             sampleCounts[nodeId] = sumSamples;
