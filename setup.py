@@ -14,6 +14,8 @@ env_copy_bins = int(os.environ.get("GRGL_COPY_BINS", 0))
 env_gsl = int(os.environ.get("GRGL_GSL", 0))
 
 THISDIR = os.path.realpath(os.path.dirname(__file__))
+PACKAGE_NAME = "pygrgl"
+EXECUTABLES = ["grgl", "grg-merge", "grgp", "gconverter", "gindexer"]
 
 
 copy_bins = bool(env_copy_bins) # Copy executables to the top-level directory?
@@ -78,8 +80,6 @@ class CMakeBuild(build_ext):
                     shutil.copy2(os.path.join(self.build_temp, executable),
                                  os.path.join(THISDIR, executable))
 
-PACKAGE_NAME = "pygrgl"
-EXECUTABLES = ["grgl", "grg-merge", "grgp", "gconverter", "gindexer"]
 
 with open(os.path.join(THISDIR, "include", "grgl", "version.h")) as vf:
     for line in vf:
