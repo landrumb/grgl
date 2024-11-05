@@ -22,6 +22,8 @@
 #include <memory>
 #include <vector>
 
+#include <mutex>
+
 #include "grgnode.h"
 #include "mutation.h"
 #include "visitor.h"
@@ -279,14 +281,20 @@ public:
         std::vector<double> result(outSize);
         dotProduct(inputData.data(), inputData.size(), direction, result.data(), outSize);
         return std::move(result);
+        
+    void addMutationAssignment(const NodeID nodeId, const MutationId mutId){
+        std::lock_guard<std::mutex> lock(m_nodeToMutationsMutex);
+        m_nodeToMutations.emplace(nodeId, mutId);
     }
 
 protected:
     // The position is the mutation ID.
     std::vector<Mutation> m_mutations;
+    std::mutex m_mutationsMutex;
     // Each node can have multiple mutations. To get the nodes for a particular mutation you have
     // to iterate the entire list. Client code should construct its own reverse map if needed.
     std::multimap<NodeID, MutationId> m_nodeToMutations;
+    std::mutex m_nodeToMutationsMutex;
 
     // (Optional) list of population descriptions. The position corresponds to the population
     // ID, which can be used to tag nodes.
