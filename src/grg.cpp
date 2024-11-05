@@ -35,14 +35,19 @@ using bitvect = std::vector<bool>;
 
 MutationId GRG::addMutation(const Mutation& mutation, const NodeID nodeId) {
     MutationId mutId = m_mutations.size();
-    m_mutations.emplace_back(mutation);
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutationsMutex);
+        m_mutations.emplace_back(mutation);
+    }
+
     if (nodeId != INVALID_NODE_ID) {
         release_assert(nodeId < this->numNodes());
     }
-    this->m_nodeToMutations.emplace(nodeId, mutId);
-    if (m_mutsAreOrdered) {
+    this->addMutationAssignment(nodeId, mutId);
+    // if (m_mutsAreOrdered) {
         m_mutsAreOrdered = false;
-    }
+    // }
     return mutId;
 }
 
@@ -325,6 +330,8 @@ void MutableGRG::visitTopo(GRGVisitor& visitor,
     while (!heap.empty()) {
         std::pop_heap(heap.begin(), heap.end(), cmpHeapNode);
         const NodeID nodeId = heap.back().m_nodeId;
+        volatile NodeID new_order = heap.back().m_order;
+
         release_assert(lastPopped <= heap.back().m_order);
         lastPopped = heap.back().m_order;
         heap.pop_back();
