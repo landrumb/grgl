@@ -15,6 +15,7 @@ env_gsl = int(os.environ.get("GRGL_GSL", 0))
 
 THISDIR = os.path.realpath(os.path.dirname(__file__))
 
+
 copy_bins = bool(env_copy_bins) # Copy executables to the top-level directory?
 extra_cmake_args = []
 build_type = "Release"
@@ -31,7 +32,18 @@ class CMakeExtension(Extension):
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
         self.extra_executables = extra_executables
 
+def all_files(dir_name):
+    result = []
+    for root, dirs, files in os.walk(dir_name):
+        for f in files:
+            result.append(os.path.join(root, f))
+    return result
+
 class CMakeBuild(build_ext):
+    def get_source_files(self):
+        return (["CMakeLists.txt", ] + all_files("src/") + all_files("include/") + all_files("third-party/")
+                + all_files("extra/") + all_files("test/"))
+
     def build_extensions(self):
         try:
             out = subprocess.check_output(["cmake", "--version"])
@@ -77,6 +89,8 @@ with open(os.path.join(THISDIR, "include", "grgl", "version.h")) as vf:
         if line.startswith("#define GRGL_MINOR_VERSION"):
             minor_version = int(line.split(" ")[-1])
 version = f"{major_version}.{minor_version}"
+with open(os.path.join(THISDIR, "README.md")) as f:
+    long_description = f.read()
 
 setup(name=PACKAGE_NAME,
       packages=find_packages(),
@@ -95,5 +109,7 @@ setup(name=PACKAGE_NAME,
       ],
       entry_points = {
         "console_scripts": ["grg=pygrgl.cli:main"],
-      }
+      },
+      long_description=long_description,
+      long_description_content_type="text/markdown",
 )
